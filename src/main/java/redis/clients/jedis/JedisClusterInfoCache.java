@@ -1,6 +1,7 @@
 package redis.clients.jedis;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -14,14 +15,15 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 
+import redis.clients.jedis.exceptions.JedisClusterOperationException;
 import redis.clients.jedis.exceptions.JedisException;
 import redis.clients.jedis.util.SafeEncoder;
 
 public class JedisClusterInfoCache {
 
   private final Map<String, ConnectionPool> nodes = new HashMap<>();
-  private final Map<Integer, ConnectionPool> slots = new HashMap<>();
-  private final Map<Integer, HostAndPort> slotNodes = new HashMap<>();
+  private final ConnectionPool[] slots = new ConnectionPool[Protocol.CLUSTER_HASHSLOTS];
+  private final HostAndPort[] slotNodes = new HostAndPort[Protocol.CLUSTER_HASHSLOTS];
 
   private final ReentrantReadWriteLock rwl = new ReentrantReadWriteLock();
   private final Lock r = rwl.readLock();
@@ -33,17 +35,6 @@ public class JedisClusterInfoCache {
   private final Set<HostAndPort> startNodes;
 
   private static final int MASTER_NODE_INDEX = 2;
-
-  @Deprecated
-  public JedisClusterInfoCache(final JedisClientConfig clientConfig) {
-    this(clientConfig, new GenericObjectPoolConfig<Connection>());
-  }
-
-  @Deprecated
-  public JedisClusterInfoCache(final JedisClientConfig clientConfig,
-      final GenericObjectPoolConfig<Connection> poolConfig) {
-    this(clientConfig, poolConfig, null);
-  }
 
   public JedisClusterInfoCache(final JedisClientConfig clientConfig, final Set<HostAndPort> startNodes) {
     this(clientConfig, null, startNodes);
@@ -58,6 +49,9 @@ public class JedisClusterInfoCache {
 
   public void discoverClusterNodesAndSlots(Connection jedis) {
     List<Object> slotsInfo = executeClusterSlots(jedis);
+    if (slotsInfo.isEmpty()) {
+      throw new JedisClusterOperationException("Cluster slots list is empty.");
+    }
     w.lock();
     try {
       reset();
@@ -139,10 +133,13 @@ public class JedisClusterInfoCache {
 
   private void discoverClusterSlots(Connection jedis) {
     List<Object> slotsInfo = executeClusterSlots(jedis);
+    if (slotsInfo.isEmpty()) {
+      throw new JedisClusterOperationException("Cluster slots list is empty.");
+    }
     w.lock();
     try {
-      this.slots.clear();
-      this.slotNodes.clear();
+      Arrays.fill(slots, null);
+      Arrays.fill(slotNodes, null);
       Set<String> hostAndPortKeys = new HashSet<>();
 
       for (Object slotInfoObj : slotsInfo) {
@@ -217,8 +214,8 @@ public class JedisClusterInfoCache {
     w.lock();
     try {
       ConnectionPool targetPool = setupNodeIfNotExist(targetNode);
-      slots.put(slot, targetPool);
-      slotNodes.put(slot, targetNode);
+      slots[slot] = targetPool;
+      slotNodes[slot] = targetNode;
     } finally {
       w.unlock();
     }
@@ -229,8 +226,8 @@ public class JedisClusterInfoCache {
     try {
       ConnectionPool targetPool = setupNodeIfNotExist(targetNode);
       for (Integer slot : targetSlots) {
-        slots.put(slot, targetPool);
-        slotNodes.put(slot, targetNode);
+        slots[slot] = targetPool;
+        slotNodes[slot] = targetNode;
       }
     } finally {
       w.unlock();
@@ -253,7 +250,7 @@ public class JedisClusterInfoCache {
   public ConnectionPool getSlotPool(int slot) {
     r.lock();
     try {
-      return slots.get(slot);
+      return slots[slot];
     } finally {
       r.unlock();
     }
@@ -262,7 +259,7 @@ public class JedisClusterInfoCache {
   public HostAndPort getSlotNode(int slot) {
     r.lock();
     try {
-      return slotNodes.get(slot);
+      return slotNodes[slot];
     } finally {
       r.unlock();
     }
@@ -304,8 +301,8 @@ public class JedisClusterInfoCache {
         }
       }
       nodes.clear();
-      slots.clear();
-      slotNodes.clear();
+      Arrays.fill(slots, null);
+      Arrays.fill(slotNodes, null);
     } finally {
       w.unlock();
     }
